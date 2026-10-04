@@ -30,7 +30,8 @@ const ALG_HINTS = {
 
 let pw = null;
 let algorithm = 'v1';
-let importedVault = null;
+let importedStored = null;   // outer StoredVault (has _v_)
+let importedVault = null;    // decrypted payload
 let busy = false;
 let resetTimer = null;
 let generateStatusShown = false;
@@ -756,6 +757,7 @@ ui['import-file'].addEventListener('change', async function (e) {
 		ui.import.disabled = false;
 	}
 
+	importedStored = stored;
 	importedVault = payload;
 	populateDatalists(payload);
 	say('Backup imported. Service and username suggestions are now available in their fields.');
@@ -800,18 +802,25 @@ function populateDatalists(vault) {
 	}
 }
 
-// Apply the algorithm the backup recorded for this service.  A wrong
-// algorithm silently produces a different (wrong) password, so when the
-// backup has no v1/v2 entry for the service, leave the toggle alone and say so.
-function applyImportedAlgorithm(service) {
-	const recorded = importedVault.algorithms && importedVault.algorithms[service];
-	if (recorded === 'v1' || recorded === 'v2') {
-		setAlgorithm(recorded);
+// Apply the algorithm the backup recorded for this (service, user)
+// pair. A wrong algorithm silently produces a different (wrong)
+// password, so when the backup has nothing to say about the pair,
+// leave the toggle alone and say so.
+function applyImportedAlgorithm(service, user) {
+	if (!importedVault) return;
+	const svc = RpassDerive.normalizeIdentifier(service);
+	const usr = RpassDerive.normalizeIdentifier(user);
+	const resolved = RpassVault.effectiveAlgorithmFor(
+		importedStored, importedVault, svc, usr
+	);
+	if (resolved === 'v1' || resolved === 'v2') {
+		setAlgorithm(resolved);
 		return;
 	}
+	const where = usr ? '"' + svc + '/' + usr + '"' : '"' + svc + '"';
 	say(
-		'This backup records no v1/v2 algorithm for "' + service +
-			'". Check the v1/v2 toggle (currently ' + algorithm + ').',
+		'This backup has no v1/v2 record for ' + where +
+			'. Check the v1/v2 toggle (currently ' + algorithm + ').',
 		false,
 		true
 	);
@@ -819,14 +828,15 @@ function applyImportedAlgorithm(service) {
 
 function maybeAutofillFromImport() {
 	if (!importedVault) return;
-	const service = ui.service.value;
-	const record = importedVault.services[service];
+	const svc = RpassDerive.normalizeIdentifier(ui.service.value);
+	const record = importedVault.services[svc];
 	if (!record) return;
-	applyImportedAlgorithm(service);
 	const users = Object.keys(record);
 	if (users.length === 0) return;
 	if (!ui.user.value) ui.user.value = users[0];
-	const iter = record[ui.user.value];
+	const usr = RpassDerive.normalizeIdentifier(ui.user.value);
+	applyImportedAlgorithm(svc, usr);
+	const iter = record[usr];
 	if (iter !== undefined) ui.iter.value = String(iter);
 	// `ui.user.value` was set programmatically, which does not fire
 	// a `change` event; refresh the badge here so it reflects the
@@ -836,10 +846,12 @@ function maybeAutofillFromImport() {
 
 function maybeAutofillIter() {
 	if (!importedVault) return;
-	const record = importedVault.services[ui.service.value];
+	const svc = RpassDerive.normalizeIdentifier(ui.service.value);
+	const usr = RpassDerive.normalizeIdentifier(ui.user.value);
+	const record = importedVault.services[svc];
 	if (!record) return;
-	applyImportedAlgorithm(ui.service.value);
-	const iter = record[ui.user.value];
+	applyImportedAlgorithm(svc, usr);
+	const iter = record[usr];
 	if (iter !== undefined) ui.iter.value = String(iter);
 	updateMigrationBadge();
 }
@@ -852,7 +864,16 @@ function maybeAutofillIter() {
 function updateMigrationBadge() {
 	const badge = ui['migration-badge'];
 	if (!badge) return;
-	if (!importedVault || !importedVault.migration) {
+	// Hide when there is no migration map, or when it is present
+	// but empty: an empty map means "no migration is or was in
+	// progress", so every pair would otherwise read as pending.
+	// A populated map — left behind by a browser restart that
+	// cleared storage.session, for example — is worth showing.
+	if (
+		!importedVault ||
+		!importedVault.migration ||
+		Object.keys(importedVault.migration).length === 0
+	) {
 		badge.hidden = true;
 		return;
 	}
